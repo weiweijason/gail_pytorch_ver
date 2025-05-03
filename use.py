@@ -114,6 +114,11 @@ def safe_forward(self, obs, actions):
                 actions = torch.zeros(obs.shape[0], self.n_actions, device=obs.device)
                 actions[:, 0] = 1.0  # 默認選擇第一個動作
         
+        # 如果 actions 是 one-hot 編碼形式，將其轉換為索引形式
+        if self.discrete_actions and len(actions.shape) == 2 and actions.shape[1] == self.n_actions:
+            actions = torch.argmax(actions, dim=1)
+            print("[DEBUG] reward_giver.forward: actions converted to indices:", actions)
+        
         # 確保批次維度匹配
         if obs.shape[0] != actions.shape[0]:
             min_batch = min(max(1, obs.shape[0]), max(1, actions.shape[0]))
