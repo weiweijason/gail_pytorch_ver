@@ -57,12 +57,42 @@ class PPO:
         if isinstance(obs, (list, tuple)) and len(obs) == 0:
             raise ValueError("環境重置返回了空的觀察值。請確保環境正確初始化。")
         
-        # 確保觀察值是numpy陣列並且有正確的維度和數據類型
-        if isinstance(obs, np.ndarray) and obs.dtype == np.object_:
-            # 將 object 類型轉換為 float32
-            obs = np.array(obs, dtype=np.float32)
-        else:
-            obs = np.array(obs, dtype=np.float32).reshape(1, -1)[0] if not isinstance(obs, np.ndarray) or obs.shape == () else obs.astype(np.float32)
+        # 處理環境觀察值的轉換
+        try:
+            # 如果是可直接展平的數組，將其轉換為浮點數
+            if isinstance(obs, np.ndarray):
+                if obs.dtype == np.object_:
+                    # 嘗試以遞迴方式處理複雜的觀察值結構
+                    flat_obs = []
+                    for item in obs.flatten():
+                        if isinstance(item, (list, tuple, np.ndarray)):
+                            flat_obs.extend([float(x) for x in item])
+                        else:
+                            flat_obs.append(float(item))
+                    obs = np.array(flat_obs, dtype=np.float32)
+                else:
+                    # 已經是數值陣列，直接轉換類型
+                    obs = obs.astype(np.float32)
+            else:
+                # 嘗試直接將觀察值轉換為扁平浮點數數組
+                try:
+                    # 簡單情況：可以直接轉換
+                    obs = np.array(obs, dtype=np.float32)
+                except (ValueError, TypeError):
+                    # 複雜情況：需要手動展平
+                    flat_obs = []
+                    
+                    def flatten_recursive(item):
+                        if isinstance(item, (list, tuple, np.ndarray)):
+                            for subitem in item:
+                                flatten_recursive(subitem)
+                        else:
+                            flat_obs.append(float(item))
+                    
+                    flatten_recursive(obs)
+                    obs = np.array(flat_obs, dtype=np.float32)
+        except Exception as e:
+            raise ValueError(f"無法將觀察值轉換為數值數組: {e}。觀察值: {obs}")
         
         done = False
         
@@ -77,18 +107,41 @@ class PPO:
             # 執行動作
             next_obs, reward, done, info = env.step(action.cpu().numpy())
             
-            # 確保next_obs也有正確的形狀和數據類型
-            if isinstance(next_obs, np.ndarray) and next_obs.dtype == np.object_:
-                next_obs = np.array(next_obs, dtype=np.float32)
-            else:
-                next_obs = np.array(next_obs, dtype=np.float32).reshape(1, -1)[0] if not isinstance(next_obs, np.ndarray) or next_obs.shape == () else next_obs.astype(np.float32)
+            # 處理下一個觀察值的轉換，與上面相同的邏輯
+            try:
+                if isinstance(next_obs, np.ndarray):
+                    if next_obs.dtype == np.object_:
+                        flat_next_obs = []
+                        for item in next_obs.flatten():
+                            if isinstance(item, (list, tuple, np.ndarray)):
+                                flat_next_obs.extend([float(x) for x in item])
+                            else:
+                                flat_next_obs.append(float(item))
+                        next_obs = np.array(flat_next_obs, dtype=np.float32)
+                    else:
+                        next_obs = next_obs.astype(np.float32)
+                else:
+                    try:
+                        next_obs = np.array(next_obs, dtype=np.float32)
+                    except (ValueError, TypeError):
+                        flat_next_obs = []
+                        
+                        def flatten_recursive(item):
+                            if isinstance(item, (list, tuple, np.ndarray)):
+                                for subitem in item:
+                                    flatten_recursive(subitem)
+                            else:
+                                flat_next_obs.append(float(item))
+                        
+                        flatten_recursive(next_obs)
+                        next_obs = np.array(flat_next_obs, dtype=np.float32)
+            except Exception as e:
+                raise ValueError(f"無法將下一個觀察值轉換為數值數組: {e}。觀察值: {next_obs}")
             
             # 如果使用GAIL，使用判別器計算獎勵
             if reward_fn is not None:
-                # 確保傳遞給reward_fn的觀察值是float32類型
-                r_obs = obs.astype(np.float32) if isinstance(obs, np.ndarray) else np.array(obs, dtype=np.float32)
-                r_action = action.cpu().numpy().astype(np.float32)
-                reward = reward_fn(r_obs, r_action)
+                # 確保傳遞給 reward_fn 的參數格式正確
+                reward = reward_fn(obs, action.cpu().numpy())
                 
             # 儲存轉換
             observations.append(obs)
@@ -104,11 +157,37 @@ class PPO:
             # 如果回合結束，重置環境
             if done:
                 obs = env.reset()
-                # 確保重置後的觀察值也有正確的形狀和數據類型
-                if isinstance(obs, np.ndarray) and obs.dtype == np.object_:
-                    obs = np.array(obs, dtype=np.float32)
-                else:
-                    obs = np.array(obs, dtype=np.float32).reshape(1, -1)[0] if not isinstance(obs, np.ndarray) or obs.shape == () else obs.astype(np.float32)
+                # 處理重置後的觀察值轉換，與上面相同的邏輯
+                try:
+                    if isinstance(obs, np.ndarray):
+                        if obs.dtype == np.object_:
+                            flat_obs = []
+                            for item in obs.flatten():
+                                if isinstance(item, (list, tuple, np.ndarray)):
+                                    flat_obs.extend([float(x) for x in item])
+                                else:
+                                    flat_obs.append(float(item))
+                            obs = np.array(flat_obs, dtype=np.float32)
+                        else:
+                            obs = obs.astype(np.float32)
+                    else:
+                        try:
+                            obs = np.array(obs, dtype=np.float32)
+                        except (ValueError, TypeError):
+                            flat_obs = []
+                            
+                            def flatten_recursive(item):
+                                if isinstance(item, (list, tuple, np.ndarray)):
+                                    for subitem in item:
+                                        flatten_recursive(subitem)
+                                else:
+                                    flat_obs.append(float(item))
+                            
+                            flatten_recursive(obs)
+                            obs = np.array(flat_obs, dtype=np.float32)
+                except Exception as e:
+                    raise ValueError(f"無法將重置後的觀察值轉換為數值數組: {e}。觀察值: {obs}")
+                
                 done = False
                 
         # 計算優勢估計
