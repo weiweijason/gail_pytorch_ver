@@ -2,6 +2,7 @@ from pytorch_gail.policies import ActorCriticPolicy
 from pytorch_gail.model import GAIL
 from pytorch_gail.dataset import ExpertDataset
 import gym
+import numpy as np
 
 # 創建環境
 env = gym.make("CartPole-v1")
@@ -22,6 +23,9 @@ gail = GAIL(
     d_step=1,
     device="cuda"
 )
+
+# 確保環境重置時返回正確格式的觀察值
+env.reset = lambda: np.array(env.reset()).reshape(1, -1)[0]
 
 # 訓練模型
 gail.learn(total_timesteps=100000)

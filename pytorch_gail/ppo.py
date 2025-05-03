@@ -52,6 +52,14 @@ class PPO:
         
         # 初始化環境
         obs = env.reset()
+        
+        # 確保觀察值是正確的形狀
+        if isinstance(obs, (list, tuple)) and len(obs) == 0:
+            raise ValueError("環境重置返回了空的觀察值。請確保環境正確初始化。")
+        
+        # 確保觀察值是numpy陣列並且有正確的維度
+        obs = np.array(obs).reshape(1, -1)[0] if not isinstance(obs, np.ndarray) or obs.shape == () else obs
+        
         done = False
         
         for _ in range(self.n_steps):
@@ -64,6 +72,9 @@ class PPO:
                 
             # 執行動作
             next_obs, reward, done, info = env.step(action.cpu().numpy())
+            
+            # 確保next_obs也有正確的形狀
+            next_obs = np.array(next_obs).reshape(1, -1)[0] if not isinstance(next_obs, np.ndarray) or next_obs.shape == () else next_obs
             
             # 如果使用GAIL，使用判別器計算獎勵
             if reward_fn is not None:
@@ -83,6 +94,8 @@ class PPO:
             # 如果回合結束，重置環境
             if done:
                 obs = env.reset()
+                # 確保重置後的觀察值也有正確的形狀
+                obs = np.array(obs).reshape(1, -1)[0] if not isinstance(obs, np.ndarray) or obs.shape == () else obs
                 done = False
                 
         # 計算優勢估計
