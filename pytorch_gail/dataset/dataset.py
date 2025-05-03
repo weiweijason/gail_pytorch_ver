@@ -6,7 +6,17 @@ import cv2  # pytype:disable=import-error
 import numpy as np
 from joblib import Parallel, delayed
 
-from stable_baselines import logger
+# 移除 stable_baselines 的導入，創建簡單的 logger 替代品
+# from stable_baselines import logger
+
+# 創建簡單的 logger 類來替代 stable_baselines 的 logger
+class SimpleLogger:
+    @staticmethod
+    def log(message):
+        print(message)
+
+# 創建 logger 實例
+logger = SimpleLogger()
 
 
 class ExpertDataset(object):
