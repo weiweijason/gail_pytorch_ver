@@ -133,6 +133,17 @@ def safe_forward(self, obs, actions):
         # 合併觀測值和動作
         inputs = torch.cat([obs, actions], dim=1)
     
+    # 在關鍵步驟添加日誌
+    print("[DEBUG] reward_giver.forward: obs shape:", obs.shape, "actions shape:", actions.shape)
+
+    # 確保 obs 和 actions 的形狀匹配
+    if obs.shape[0] != actions.shape[0]:
+        raise ValueError(f"批次大小不匹配: obs.shape[0]={obs.shape[0]}, actions.shape[0]={actions.shape[0]}")
+
+    # 確保 actions 的值在動作空間範圍內
+    if hasattr(env.action_space, 'n') and not (0 <= actions).all() and not (actions < env.action_space.n).all():
+        raise ValueError(f"動作值超出範圍: actions={actions}, action_space.n={env.action_space.n}")
+
     # 實際前向傳播
     return self.network(inputs)
 
