@@ -7,7 +7,7 @@ import gym
 env = gym.make("CartPole-v1")
 
 # 載入專家數據
-dataset = ExpertDataset(expert_path="expert_data.npz")
+dataset = ExpertDataset(expert_path="expert_cartpole.npz")
 
 # 創建策略網路
 policy = ActorCriticPolicy(env.observation_space, env.action_space, hidden_size=64)
