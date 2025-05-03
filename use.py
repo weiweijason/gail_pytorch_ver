@@ -5,9 +5,9 @@ import gym
 import numpy as np
 import torch
 
-# 強制使用CPU以避免CUDA錯誤
-device = "cpu"
-torch.cuda.is_available = lambda: False
+# 使用 GPU (如果可用)
+device = "cuda" if torch.cuda.is_available() else "cpu"
+print(f"使用裝置: {device}")
 
 # 檢查 gym 版本並設置相應的環境包裝
 try:
@@ -25,7 +25,7 @@ dataset = ExpertDataset(expert_path="expert_cartpole.npz")
 # 創建策略網路
 policy = ActorCriticPolicy(env.observation_space, env.action_space, hidden_size=64)
 
-# 創建GAIL模型，強制使用CPU
+# 創建GAIL模型
 gail = GAIL(
     policy=policy,
     env=env,
@@ -79,22 +79,122 @@ def wrapped_step(action):
 
 env.step = wrapped_step
 
-# 添加一個簡化版的獎勵函數，避免使用判別器的獎勵
-def simple_reward(obs, action):
-    # 返回一個簡單的固定獎勵: 1.0
-    # 要確保返回的形狀與輸入的 obs 批次大小一致
-    if isinstance(obs, np.ndarray):
-        if len(obs.shape) > 1:
-            return np.ones(obs.shape[0])
-        else:
-            return np.array([1.0])
-    return np.array([1.0])
+# 修補 TransitionClassifier.forward 方法來修復 CUDA 錯誤
+original_forward = gail.reward_giver.forward
 
-# 修改 GAIL 類的學習方法，使用安全的學習流程
+def safe_forward(self, obs, actions):
+    """修補版的 forward 方法，避免 CUDA 錯誤"""
+    with torch.no_grad():
+        # 處理觀測值
+        if self.normalize:
+            obs = (obs - self.obs_rms.mean) / self.obs_rms.std
+        
+        # 確保張量維度匹配
+        if len(obs.shape) != len(actions.shape):
+            # 如果維度數量不同
+            if len(actions.shape) == 3 and len(obs.shape) == 2:
+                # 3D動作張量 -> 2D
+                actions = actions.view(actions.shape[0], -1)
+            elif len(obs.shape) == 3 and len(actions.shape) == 2:
+                # 如果觀察值是3D但動作是2D
+                obs = obs.view(obs.shape[0], -1)
+        
+        # 處理動作
+        if self.discrete_actions:
+            # 處理空張量情況
+            if actions.shape[0] == 0:
+                actions = torch.zeros(obs.shape[0], dtype=torch.long, device=obs.device)
+            
+            try:
+                # 確保離散動作是正確的長整型並轉為one-hot編碼
+                actions = actions.reshape(-1).long()  # 確保是1D
+                actions = F.one_hot(actions, self.n_actions).float()
+            except Exception as e:
+                print(f"處理離散動作時出錯: {e}，使用默認動作")
+                actions = torch.zeros(obs.shape[0], self.n_actions, device=obs.device)
+                actions[:, 0] = 1.0  # 默認選擇第一個動作
+        
+        # 確保批次維度匹配
+        if obs.shape[0] != actions.shape[0]:
+            min_batch = min(max(1, obs.shape[0]), max(1, actions.shape[0]))
+            if obs.shape[0] > 0:
+                obs = obs[:min_batch]
+            else:
+                # 如果 obs 是空的，創建一個假的觀察值
+                obs = torch.zeros((min_batch, obs.shape[1] if len(obs.shape) > 1 else 4), device=obs.device)
+                
+            if actions.shape[0] > 0:
+                actions = actions[:min_batch]
+            else:
+                # 如果 actions 是空的，創建一個假的動作張量
+                action_dim = self.n_actions if self.discrete_actions else actions.shape[1] if len(actions.shape) > 1 else 1
+                actions = torch.zeros((min_batch, action_dim), device=actions.device)
+        
+        # 合併觀測值和動作
+        inputs = torch.cat([obs, actions], dim=1)
+    
+    # 實際前向傳播
+    return self.network(inputs)
+
+# 替換 forward 方法
+gail.reward_giver.forward = lambda obs, actions: safe_forward(gail.reward_giver, obs, actions)
+
+# 修補 get_reward 方法
+original_get_reward = gail.reward_giver.get_reward
+
+def safe_get_reward(self, obs, actions):
+    """安全版本的 get_reward 方法，處理各種錯誤情況"""
+    try:
+        with torch.no_grad():
+            # 將觀察值轉換為張量
+            obs_tensor = torch.FloatTensor(obs).to(self.device)
+            if len(obs_tensor.shape) == 1:
+                obs_tensor = obs_tensor.unsqueeze(0)
+                
+            # 將動作轉換為張量並處理可能的空張量情況
+            if isinstance(actions, np.ndarray):
+                if actions.size == 0:
+                    if self.discrete_actions:
+                        actions_tensor = torch.zeros(obs_tensor.shape[0], dtype=torch.long, device=self.device)
+                    else:
+                        actions_tensor = torch.zeros((obs_tensor.shape[0], 1), device=self.device)
+                else:
+                    actions_tensor = torch.FloatTensor(actions).to(self.device)
+            else:
+                actions_tensor = actions.to(self.device)
+            
+            # 確保動作維度正確
+            if len(actions_tensor.shape) == 0:  # 標量
+                actions_tensor = actions_tensor.unsqueeze(0).unsqueeze(0)
+            elif len(actions_tensor.shape) == 1:  # 1D向量
+                if self.discrete_actions and actions_tensor.shape[0] != obs_tensor.shape[0]:
+                    # 如果是離散動作且批次大小不匹配
+                    actions_tensor = actions_tensor.unsqueeze(0)
+                elif not self.discrete_actions and actions_tensor.shape[0] not in [obs_tensor.shape[0], self.n_actions]:
+                    # 如果是連續動作且維度不匹配
+                    actions_tensor = actions_tensor.unsqueeze(0)
+            
+            # 計算獎勵
+            logits = self.forward(obs_tensor, actions_tensor)
+            reward = -torch.log(1 - torch.sigmoid(logits) + 1e-8)
+            
+            return reward.cpu().numpy()
+    except Exception as e:
+        print(f"計算獎勵時出錯: {e}")
+        # 返回一個默認獎勵
+        if isinstance(obs, np.ndarray) and len(obs.shape) > 1:
+            return np.ones(obs.shape[0]) * 0.1
+        else:
+            return np.array([0.1])
+
+# 替換 get_reward 方法
+gail.reward_giver.get_reward = lambda obs, actions: safe_get_reward(gail.reward_giver, obs, actions)
+
+# 增強的 learn 方法 - 使用 GAIL 獎勵但增加錯誤處理
 original_learn = gail.learn
 
-def safe_learn(total_timesteps, callback=None, log_interval=100, tb_log_name="GAIL"):
-    """安全版本的學習方法，使用簡單獎勵避免CUDA錯誤"""
+def enhanced_learn(total_timesteps, callback=None, log_interval=100, tb_log_name="GAIL"):
+    """增強版的學習方法，提供更好的錯誤處理"""
     assert gail.expert_dataset is not None, "必須提供專家數據集來訓練GAIL"
     
     timesteps_per_batch = gail.rl_learner.n_steps * gail.rl_learner.n_envs
@@ -102,10 +202,10 @@ def safe_learn(total_timesteps, callback=None, log_interval=100, tb_log_name="GA
     
     for batch_idx in range(n_batches):
         try:
-            # 使用簡單獎勵而非判別器獎勵
-            rollout = gail.rl_learner.collect_rollouts(gail.env, reward_fn=simple_reward)
+            # 收集一批經驗，使用判別器獎勵
+            rollout = gail.rl_learner.collect_rollouts(gail.env, reward_fn=gail.reward_giver.get_reward)
             
-            # 訓練判別器 (仍然嘗試，但捕獲任何錯誤)
+            # 訓練判別器
             if batch_idx % gail.d_step == 0:
                 try:
                     d_losses = []
@@ -117,24 +217,24 @@ def safe_learn(total_timesteps, callback=None, log_interval=100, tb_log_name="GA
                         # 獲取專家的觀測值和動作
                         expert_obs, expert_actions = gail.expert_dataset.get_next_batch()
                         
-                        # 嘗試訓練判別器，但包裹在 try-except 中
-                        try:
-                            d_loss = gail.reward_giver.train_discriminator(
-                                expert_obs, expert_actions, 
-                                policy_obs, policy_actions
-                            )
-                            d_losses.append(d_loss)
-                        except Exception as e:
-                            print(f"單步判別器訓練時出錯: {e}")
+                        # 訓練判別器
+                        d_loss = gail.reward_giver.train_discriminator(
+                            expert_obs, expert_actions, 
+                            policy_obs, policy_actions
+                        )
+                        d_losses.append(d_loss)
                 except Exception as e:
-                    print(f"訓練判別器整體流程出錯: {e}")
+                    print(f"訓練判別器時出錯: {e}")
             
-            # 使用獎勵訓練策略
+            # 使用GAIL獎勵訓練策略
             gail.rl_learner.train_on_batch(rollout)
             
             # 日誌記錄
             if (batch_idx + 1) % log_interval == 0:
                 print(f"===== Batch {batch_idx + 1}/{n_batches} =====")
+                if len(d_losses) > 0:
+                    for k, v in d_losses[-1].items():
+                        print(f"{k}: {v:.4f}")
         except Exception as e:
             print(f"批次 {batch_idx} 處理時發生錯誤: {e}")
             continue
@@ -142,7 +242,10 @@ def safe_learn(total_timesteps, callback=None, log_interval=100, tb_log_name="GA
     return gail.rl_learner
 
 # 替換原始的學習方法
-gail.learn = safe_learn
+gail.learn = enhanced_learn
+
+# 添加一個導入以便使用 F.one_hot
+import torch.nn.functional as F
 
 # 訓練模型
 try:
