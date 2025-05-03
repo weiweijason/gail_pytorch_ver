@@ -57,8 +57,12 @@ class PPO:
         if isinstance(obs, (list, tuple)) and len(obs) == 0:
             raise ValueError("環境重置返回了空的觀察值。請確保環境正確初始化。")
         
-        # 確保觀察值是numpy陣列並且有正確的維度
-        obs = np.array(obs).reshape(1, -1)[0] if not isinstance(obs, np.ndarray) or obs.shape == () else obs
+        # 確保觀察值是numpy陣列並且有正確的維度和數據類型
+        if isinstance(obs, np.ndarray) and obs.dtype == np.object_:
+            # 將 object 類型轉換為 float32
+            obs = np.array(obs, dtype=np.float32)
+        else:
+            obs = np.array(obs, dtype=np.float32).reshape(1, -1)[0] if not isinstance(obs, np.ndarray) or obs.shape == () else obs.astype(np.float32)
         
         done = False
         
@@ -73,12 +77,18 @@ class PPO:
             # 執行動作
             next_obs, reward, done, info = env.step(action.cpu().numpy())
             
-            # 確保next_obs也有正確的形狀
-            next_obs = np.array(next_obs).reshape(1, -1)[0] if not isinstance(next_obs, np.ndarray) or next_obs.shape == () else next_obs
+            # 確保next_obs也有正確的形狀和數據類型
+            if isinstance(next_obs, np.ndarray) and next_obs.dtype == np.object_:
+                next_obs = np.array(next_obs, dtype=np.float32)
+            else:
+                next_obs = np.array(next_obs, dtype=np.float32).reshape(1, -1)[0] if not isinstance(next_obs, np.ndarray) or next_obs.shape == () else next_obs.astype(np.float32)
             
             # 如果使用GAIL，使用判別器計算獎勵
             if reward_fn is not None:
-                reward = reward_fn(obs, action.cpu().numpy())
+                # 確保傳遞給reward_fn的觀察值是float32類型
+                r_obs = obs.astype(np.float32) if isinstance(obs, np.ndarray) else np.array(obs, dtype=np.float32)
+                r_action = action.cpu().numpy().astype(np.float32)
+                reward = reward_fn(r_obs, r_action)
                 
             # 儲存轉換
             observations.append(obs)
@@ -94,8 +104,11 @@ class PPO:
             # 如果回合結束，重置環境
             if done:
                 obs = env.reset()
-                # 確保重置後的觀察值也有正確的形狀
-                obs = np.array(obs).reshape(1, -1)[0] if not isinstance(obs, np.ndarray) or obs.shape == () else obs
+                # 確保重置後的觀察值也有正確的形狀和數據類型
+                if isinstance(obs, np.ndarray) and obs.dtype == np.object_:
+                    obs = np.array(obs, dtype=np.float32)
+                else:
+                    obs = np.array(obs, dtype=np.float32).reshape(1, -1)[0] if not isinstance(obs, np.ndarray) or obs.shape == () else obs.astype(np.float32)
                 done = False
                 
         # 計算優勢估計
@@ -103,14 +116,15 @@ class PPO:
             rewards, values, dones
         )
         
+        # 確保所有數據都是浮點型
         return {
-            'observations': np.array(observations),
-            'actions': np.array(actions),
-            'rewards': np.array(rewards),
-            'values': np.array(values),
-            'dones': np.array(dones),
-            'log_probs': np.array(log_probs),
-            'advantages': advantages
+            'observations': np.array(observations, dtype=np.float32),
+            'actions': np.array(actions, dtype=np.float32),
+            'rewards': np.array(rewards, dtype=np.float32),
+            'values': np.array(values, dtype=np.float32),
+            'dones': np.array(dones, dtype=np.float32),
+            'log_probs': np.array(log_probs, dtype=np.float32),
+            'advantages': advantages.astype(np.float32)
         }
         
     def _compute_advantages(self, rewards, values, dones):
