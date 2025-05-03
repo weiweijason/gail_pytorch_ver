@@ -141,6 +141,25 @@ def safe_forward(self, obs, actions):
     # 在關鍵步驟添加日誌
     print("[DEBUG] reward_giver.forward: obs shape:", obs.shape, "actions shape:", actions.shape)
 
+    # 確保 actions 的形狀和值正確
+    if self.discrete_actions:
+        if len(actions.shape) == 2 and actions.shape[1] == self.n_actions:
+            actions = torch.argmax(actions, dim=1)
+            print("[DEBUG] reward_giver.forward: actions converted to indices:", actions)
+        elif len(actions.shape) != 1:
+            raise ValueError(f"離散動作的形狀應為 [batch_size]，但得到 {actions.shape}")
+
+        # 確保 actions 的值在範圍內
+        if not ((0 <= actions).all() and (actions < self.n_actions).all()):
+            raise ValueError(f"離散動作的值應在 [0, {self.n_actions}) 範圍內，但得到 {actions}")
+
+    # 確保 obs 和 actions 的批次大小一致
+    if obs.shape[0] != actions.shape[0]:
+        raise ValueError(f"批次大小不匹配: obs.shape[0]={obs.shape[0]}, actions.shape[0]={actions.shape[0]}")
+
+    # 添加更多日誌
+    print("[DEBUG] reward_giver.forward: final obs shape:", obs.shape, "final actions shape:", actions.shape)
+
     # 檢查 actions 的形狀和值
     print("[DEBUG] reward_giver.forward: actions values:", actions)
     if self.discrete_actions:
