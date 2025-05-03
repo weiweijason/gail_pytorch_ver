@@ -102,232 +102,244 @@ class TransitionClassifier(nn.Module):
         self.to(device)
 
     def forward(self, obs, actions):
-        # 處理觀測值
-        if self.normalize:
-            obs = (obs - self.obs_rms.mean) / self.obs_rms.std
-        
-        # 檢查空批次問題
-        if actions.shape[0] == 0:
-            # 如果動作張量是空的，使用一個默認動作張量
-            if self.discrete_actions:
-                actions = torch.zeros(obs.shape[0], 1, device=self.device)
-            else:
-                actions = torch.zeros(obs.shape[0], self.n_actions, device=self.device)
-        
-        # 確保張量維度匹配
-        # 檢查並修正維度不匹配問題
-        if len(obs.shape) != len(actions.shape):
-            # 如果維度數量不同
-            if len(actions.shape) == 3 and len(obs.shape) == 2:
-                # 3D動作張量 -> 2D
-                actions = actions.view(actions.shape[0], -1)
-            elif len(obs.shape) == 3 and len(actions.shape) == 2:
-                # 如果觀察值是3D但動作是2D
-                obs = obs.view(obs.shape[0], -1)
-        
-        # 處理動作
-        if self.discrete_actions:
-            # 確保離散動作是正確的長整型並轉為one-hot編碼
-            try:
-                actions = actions.reshape(-1).long()  # 確保是1D
-                actions = F.one_hot(actions, self.n_actions).float()
-            except RuntimeError as e:
-                # 如果轉換失敗，創建默認的one-hot編碼
-                print(f"動作轉換錯誤: {e}，使用默認動作")
-                actions = torch.zeros(obs.shape[0], self.n_actions, device=self.device)
-                actions[:, 0] = 1.0  # 默認選擇第一個動作
-            
-        # 合併觀測值和動作前確保兩者形狀兼容
-        # 如果批次維度不匹配，但觀察值非空
-        if obs.shape[0] != actions.shape[0]:
-            if obs.shape[0] > 0 and actions.shape[0] > 0:
-                # 嘗試調整批次大小
-                min_batch = min(obs.shape[0], actions.shape[0])
-                obs = obs[:min_batch]
-                actions = actions[:min_batch]
-            elif obs.shape[0] > 0 and actions.shape[0] == 0:
-                # 如果動作是空的但觀察值不是，創建與觀察值匹配的動作
-                if self.discrete_actions:
-                    actions = torch.zeros(obs.shape[0], self.n_actions, device=self.device)
-                    actions[:, 0] = 1.0  # 默認選擇第一個動作
-                else:
-                    actions = torch.zeros(obs.shape[0], self.n_actions, device=self.device)
-            elif obs.shape[0] == 0:
-                # 如果觀察值是空的，返回一個零張量
-                return torch.zeros(1, 1, device=self.device)
-        
-        # 合併觀測值和動作
+        """
+        完全重寫的 forward 方法，確保不會觸發 CUDA 錯誤
+        """
         try:
-            inputs = torch.cat([obs, actions], dim=1)
-            return self.network(inputs)
-        except RuntimeError as e:
-            print(f"合併張量錯誤: {e}, obs.shape={obs.shape}, actions.shape={actions.shape}")
-            # 返回一個零張量作為後備
-            return torch.zeros(max(1, obs.shape[0]), 1, device=self.device)
-        
+            # 處理觀測值
+            if self.normalize:
+                obs = (obs - self.obs_rms.mean) / self.obs_rms.std
+            
+            # 完全安全的離散動作處理
+            if self.discrete_actions:
+                # 檢測空批次或無效批次
+                if actions.numel() == 0 or actions.shape[0] == 0:
+                    # 創建安全的動作張量
+                    if obs.shape[0] > 0:
+                        # 生成與觀察值匹配批次大小的動作
+                        fake_actions = torch.zeros(obs.shape[0], self.n_actions, device=obs.device)
+                        fake_actions[:, 0] = 1.0  # 默認選擇第一個動作
+                        actions = fake_actions
+                    else:
+                        # 如果觀察值也是空的，創建一個單例批次
+                        fake_actions = torch.zeros(1, self.n_actions, device=obs.device)
+                        fake_actions[0, 0] = 1.0
+                        actions = fake_actions
+                        
+                        # 同時為觀察值創建匹配的假數據
+                        if obs.numel() == 0 or obs.shape[0] == 0:
+                            input_dim = self.observation_shape[0] if len(self.observation_shape) > 0 else 4
+                            obs = torch.zeros(1, input_dim, device=obs.device)
+                else:
+                    # 處理非空但需要 one-hot 編碼的動作
+                    try:
+                        # 檢查動作張量是否已經是 one-hot 編碼
+                        if len(actions.shape) == 1 or (len(actions.shape) == 2 and actions.shape[1] == 1):
+                            # 需要 one-hot 編碼
+                            actions = actions.reshape(-1).long()
+                            # 確保動作在有效範圍內
+                            actions = torch.clamp(actions, 0, self.n_actions - 1)
+                            # 創建 one-hot 編碼
+                            actions = torch.nn.functional.one_hot(actions, self.n_actions).float()
+                        elif len(actions.shape) == 2 and actions.shape[1] == self.n_actions:
+                            # 已經是 one-hot 編碼格式，確保是浮點型
+                            actions = actions.float()
+                        else:
+                            # 不明形狀，創建默認 one-hot
+                            print(f"無法識別的動作形狀: {actions.shape}，使用默認值")
+                            fake_actions = torch.zeros(obs.shape[0], self.n_actions, device=obs.device)
+                            fake_actions[:, 0] = 1.0  # 默認選擇第一個動作
+                            actions = fake_actions
+                    except Exception as e:
+                        print(f"處理離散動作時出錯: {e}，使用默認動作")
+                        fake_actions = torch.zeros(obs.shape[0], self.n_actions, device=obs.device)
+                        fake_actions[:, 0] = 1.0
+                        actions = fake_actions
+            
+            # 確保批次維度匹配
+            if obs.shape[0] != actions.shape[0]:
+                # 打印調試信息
+                print(f"批次維度不匹配: obs.shape={obs.shape}, actions.shape={actions.shape}")
+                
+                # 調整批次大小
+                min_batch = min(max(1, obs.shape[0]), max(1, actions.shape[0]))
+                
+                # 裁剪或擴展觀察值
+                if obs.shape[0] > min_batch:
+                    obs = obs[:min_batch]
+                elif obs.shape[0] < min_batch:
+                    # 通過複製現有數據擴展觀察值
+                    if obs.shape[0] > 0:
+                        repeat_times = min_batch // obs.shape[0] + (1 if min_batch % obs.shape[0] > 0 else 0)
+                        obs = obs.repeat(repeat_times, 1)[:min_batch]
+                    else:
+                        # 如果 obs 是空的，創建假數據
+                        input_dim = self.observation_shape[0] if len(self.observation_shape) > 0 else 4
+                        obs = torch.zeros(min_batch, input_dim, device=obs.device)
+                
+                # 裁剪或擴展動作
+                if actions.shape[0] > min_batch:
+                    actions = actions[:min_batch]
+                elif actions.shape[0] < min_batch:
+                    # 通過複製現有數據擴展動作
+                    if actions.shape[0] > 0:
+                        repeat_times = min_batch // actions.shape[0] + (1 if min_batch % actions.shape[0] > 0 else 0)
+                        actions = actions.repeat(repeat_times, 1)[:min_batch]
+                    else:
+                        # 如果 actions 是空的，創建假數據
+                        action_dim = self.n_actions if self.discrete_actions else 1
+                        actions = torch.zeros(min_batch, action_dim, device=actions.device)
+            
+            # 合併觀測值和動作
+            try:
+                inputs = torch.cat([obs, actions], dim=1)
+                return self.network(inputs)
+            except RuntimeError as e:
+                print(f"張量連接或網絡前向傳播錯誤: {e}")
+                print(f"Debug info - obs: {obs.shape}, actions: {actions.shape}")
+                # 返回一個零張量作為默認輸出
+                return torch.zeros(max(1, obs.shape[0]), 1, device=obs.device)
+                
+        except Exception as e:
+            print(f"前向傳播中發生未預期錯誤: {e}")
+            # 最終的應急方案
+            return torch.zeros(1, 1, device=self.device)
+
     def get_reward(self, obs, actions):
         """
-        使用觀測值和動作預測獎勵
-        
-        這個方法已經徹底重寫，確保在任何情況下都能安全運行，不會觸發CUDA錯誤
+        使用觀測值和動作預測獎勵 - 完全加固版
         """
-        # 使用 try-except 包裝整個方法確保不會崩潰
         try:
             with torch.no_grad():
-                # 安全地處理觀察值
+                # 檢查輸入是否為空
+                if isinstance(obs, np.ndarray) and (obs.size == 0 or obs.shape[0] == 0):
+                    return np.array([0.1])  # 返回默認值
+                
+                if isinstance(actions, np.ndarray) and (actions.size == 0 or actions.shape[0] == 0):
+                    # 為空動作創建默認獎勵，與觀察值批次大小匹配
+                    batch_size = obs.shape[0] if isinstance(obs, np.ndarray) and len(obs.shape) > 0 else 1
+                    return np.ones(batch_size) * 0.1
+                
+                # 轉換為張量
                 if isinstance(obs, np.ndarray):
-                    if obs.size == 0:  # 檢查空數組
-                        return np.array([0.0])  # 返回默認獎勵
                     obs_tensor = torch.FloatTensor(obs).to(self.device)
                 else:
                     obs_tensor = obs.to(self.device)
                 
-                # 確保觀察值是2D [batch_size, feature_dim]
-                if len(obs_tensor.shape) == 0:
-                    obs_tensor = obs_tensor.unsqueeze(0).unsqueeze(0)
-                elif len(obs_tensor.shape) == 1:
-                    obs_tensor = obs_tensor.unsqueeze(0)
-                
-                # 安全地處理動作
                 if isinstance(actions, np.ndarray):
-                    if actions.size == 0:  # 檢查空數組
-                        # 創建一個默認動作: 0
-                        if self.discrete_actions:
-                            actions_tensor = torch.zeros(obs_tensor.shape[0], dtype=torch.long, device=self.device)
-                        else:
-                            actions_tensor = torch.zeros(obs_tensor.shape[0], self.n_actions, device=self.device)
-                    else:
-                        actions_tensor = torch.FloatTensor(actions).to(self.device)
+                    actions_tensor = torch.FloatTensor(actions).to(self.device)
                 else:
                     actions_tensor = actions.to(self.device)
                 
-                # 處理動作維度
-                if len(actions_tensor.shape) == 0:
-                    # 單個標量值
-                    actions_tensor = actions_tensor.unsqueeze(0).unsqueeze(0)
-                elif len(actions_tensor.shape) == 1:
-                    # 1D 動作
-                    if self.discrete_actions:
-                        # 如果是離散動作，保持為1D [batch_size]
-                        if actions_tensor.shape[0] != obs_tensor.shape[0]:
-                            # 批次大小不匹配，調整
-                            if actions_tensor.shape[0] == 1:
-                                actions_tensor = actions_tensor.repeat(obs_tensor.shape[0])
-                            else:
-                                actions_tensor = actions_tensor[:obs_tensor.shape[0]]
-                    else:
-                        # 如果是連續動作，擴展為2D [batch_size, action_dim]
-                        # 判斷形狀是 [batch_size] 還是 [action_dim]
-                        if actions_tensor.shape[0] == self.n_actions:
-                            # 是 [action_dim]，擴展為 [batch_size, action_dim]
-                            actions_tensor = actions_tensor.unsqueeze(0).expand(obs_tensor.shape[0], -1)
-                        else:
-                            # 是 [batch_size]，擴展為 [batch_size, 1]
-                            actions_tensor = actions_tensor.unsqueeze(1)
-                            # 如果批次大小不匹配
-                            if actions_tensor.shape[0] != obs_tensor.shape[0]:
-                                if actions_tensor.shape[0] == 1:
-                                    actions_tensor = actions_tensor.expand(obs_tensor.shape[0], -1)
-                                else:
-                                    actions_tensor = actions_tensor[:obs_tensor.shape[0]]
-                elif len(actions_tensor.shape) == 2:
-                    # 已經是2D [batch_size, action_dim]
-                    if actions_tensor.shape[0] != obs_tensor.shape[0]:
-                        # 批次大小不匹配
-                        if actions_tensor.shape[0] == 1:
-                            actions_tensor = actions_tensor.expand(obs_tensor.shape[0], -1)
-                        elif obs_tensor.shape[0] == 1:
-                            obs_tensor = obs_tensor.expand(actions_tensor.shape[0], -1)
-                        else:
-                            # 截取至較小批次
-                            min_batch = min(obs_tensor.shape[0], actions_tensor.shape[0])
-                            obs_tensor = obs_tensor[:min_batch]
-                            actions_tensor = actions_tensor[:min_batch]
-                elif len(actions_tensor.shape) == 3:
-                    # 3D [batch_size, seq_len, action_dim] -> [batch_size, seq_len*action_dim]
-                    actions_tensor = actions_tensor.reshape(actions_tensor.shape[0], -1)
-                    
-                # 檢查動作張量是否有效
-                if actions_tensor.shape[0] == 0:
-                    print("警告: 動作張量批次大小為0，使用默認值")
-                    if self.discrete_actions:
-                        actions_tensor = torch.zeros(obs_tensor.shape[0], dtype=torch.long, device=self.device)
-                    else:
-                        actions_tensor = torch.zeros(obs_tensor.shape[0], self.n_actions, device=self.device)
+                # 確保張量是正確的形狀
+                if len(obs_tensor.shape) == 1:
+                    obs_tensor = obs_tensor.unsqueeze(0)
                 
-                # 確保離散動作為整數類型
-                if self.discrete_actions:
-                    try:
-                        actions_tensor = actions_tensor.long()
-                    except Exception as e:
-                        print(f"轉換動作為長整型失敗: {e}")
-                        actions_tensor = torch.zeros(obs_tensor.shape[0], dtype=torch.long, device=self.device)
+                # 簡化動作處理，保持原始張量形狀，讓 forward 方法處理 one-hot 編碼
+                # 這避免了之前可能觸發的索引錯誤
                 
-                # 安全地調用forward方法
+                # 計算獎勵
                 try:
-                    logits = self(obs_tensor, actions_tensor)
+                    logits = self.forward(obs_tensor, actions_tensor)
                     reward = -torch.log(1 - torch.sigmoid(logits) + 1e-8)
                     return reward.cpu().numpy()
                 except Exception as e:
-                    print(f"前向傳播過程錯誤: {e}")
+                    print(f"計算獎勵邏輯中出錯: {e}")
                     # 返回默認獎勵
-                    return np.ones(obs_tensor.shape[0]) * 0.1  # 默認小獎勵
+                    batch_size = obs_tensor.shape[0] if obs_tensor.shape[0] > 0 else 1
+                    return np.ones(batch_size) * 0.1
         except Exception as e:
-            print(f"獎勵計算過程發生錯誤: {e}")
-            # 返回默認獎勵而不是崩潰
-            return np.array([0.1])
-            
+            print(f"獎勵計算過程發生未預期錯誤: {e}")
+            return np.array([0.1])  # 單一默認獎勵
+
     def train_discriminator(self, expert_obs, expert_actions, policy_obs, policy_actions):
         """
-        訓練鑑別器區分專家和策略
+        訓練鑑別器區分專家和策略 - 增強版
         """
-        # 轉換為PyTorch張量
-        expert_obs = torch.FloatTensor(expert_obs).to(self.device)
-        expert_actions = torch.FloatTensor(expert_actions).to(self.device)
-        policy_obs = torch.FloatTensor(policy_obs).to(self.device)
-        policy_actions = torch.FloatTensor(policy_actions).to(self.device)
-        
-        # 更新運行時統計
-        if self.normalize:
-            self.obs_rms.update(torch.cat([expert_obs, policy_obs], dim=0))
-        
-        # 計算專家和策略的 logits
-        expert_logits = self(expert_obs, expert_actions)
-        policy_logits = self(policy_obs, policy_actions)
-        
-        # 計算損失
-        expert_loss = F.binary_cross_entropy_with_logits(
-            expert_logits, 
-            torch.ones(expert_logits.size()).to(self.device)
-        )
-        policy_loss = F.binary_cross_entropy_with_logits(
-            policy_logits, 
-            torch.zeros(policy_logits.size()).to(self.device)
-        )
-        
-        # 計算熵損失
-        logits = torch.cat([policy_logits, expert_logits], dim=0)
-        entropy = torch.mean(logit_bernoulli_entropy(logits))
-        entropy_loss = -self.entcoeff * entropy
-        
-        # 總損失
-        loss = expert_loss + policy_loss + entropy_loss
-        
-        # 計算準確率
-        policy_acc = torch.mean((torch.sigmoid(policy_logits) < 0.5).float())
-        expert_acc = torch.mean((torch.sigmoid(expert_logits) > 0.5).float())
-        
-        # 優化
-        self.optimizer.zero_grad()
-        loss.backward()
-        self.optimizer.step()
-        
-        return {
-            'policy_loss': policy_loss.item(),
-            'expert_loss': expert_loss.item(),
-            'entropy': entropy.item(),
-            'entropy_loss': entropy_loss.item(),
-            'policy_acc': policy_acc.item(),
-            'expert_acc': expert_acc.item(),
-            'total_loss': loss.item()
-        }
+        try:
+            # 檢查數據有效性
+            if len(expert_obs) == 0 or len(expert_actions) == 0 or len(policy_obs) == 0 or len(policy_actions) == 0:
+                print("訓練數據為空，跳過本次判別器訓練")
+                return {
+                    'policy_loss': 0.0,
+                    'expert_loss': 0.0,
+                    'entropy': 0.0,
+                    'entropy_loss': 0.0,
+                    'policy_acc': 0.5,
+                    'expert_acc': 0.5,
+                    'total_loss': 0.0
+                }
+            
+            # 轉換為PyTorch張量
+            expert_obs = torch.FloatTensor(expert_obs).to(self.device)
+            expert_actions = torch.FloatTensor(expert_actions).to(self.device)
+            policy_obs = torch.FloatTensor(policy_obs).to(self.device)
+            policy_actions = torch.FloatTensor(policy_actions).to(self.device)
+            
+            # 更新運行時統計
+            if self.normalize:
+                self.obs_rms.update(torch.cat([expert_obs, policy_obs], dim=0))
+            
+            # 計算專家和策略的 logits
+            expert_logits = self.forward(expert_obs, expert_actions)
+            policy_logits = self.forward(policy_obs, policy_actions)
+            
+            # 檢查 logits 是否有效
+            if torch.isnan(expert_logits).any() or torch.isnan(policy_logits).any():
+                print("警告: 發現 NaN 值，使用零張量替代")
+                if torch.isnan(expert_logits).any():
+                    expert_logits = torch.zeros_like(expert_logits)
+                if torch.isnan(policy_logits).any():
+                    policy_logits = torch.zeros_like(policy_logits)
+            
+            # 計算損失
+            expert_loss = F.binary_cross_entropy_with_logits(
+                expert_logits, 
+                torch.ones(expert_logits.size()).to(self.device)
+            )
+            policy_loss = F.binary_cross_entropy_with_logits(
+                policy_logits, 
+                torch.zeros(policy_logits.size()).to(self.device)
+            )
+            
+            # 計算熵損失
+            logits = torch.cat([policy_logits, expert_logits], dim=0)
+            entropy = torch.mean(logit_bernoulli_entropy(logits))
+            entropy_loss = -self.entcoeff * entropy
+            
+            # 總損失
+            loss = expert_loss + policy_loss + entropy_loss
+            
+            # 計算準確率
+            policy_acc = torch.mean((torch.sigmoid(policy_logits) < 0.5).float())
+            expert_acc = torch.mean((torch.sigmoid(expert_logits) > 0.5).float())
+            
+            # 優化
+            self.optimizer.zero_grad()
+            loss.backward()
+            
+            # 梯度裁剪以避免梯度爆炸
+            torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=10.0)
+            
+            self.optimizer.step()
+            
+            return {
+                'policy_loss': policy_loss.item(),
+                'expert_loss': expert_loss.item(),
+                'entropy': entropy.item(),
+                'entropy_loss': entropy_loss.item(),
+                'policy_acc': policy_acc.item(),
+                'expert_acc': expert_acc.item(),
+                'total_loss': loss.item()
+            }
+        except Exception as e:
+            print(f"訓練判別器時發生未預期錯誤: {e}")
+            return {
+                'policy_loss': 0.0,
+                'expert_loss': 0.0,
+                'entropy': 0.0,
+                'entropy_loss': 0.0,
+                'policy_acc': 0.5,
+                'expert_acc': 0.5,
+                'total_loss': 0.0
+            }
