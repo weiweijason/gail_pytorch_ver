@@ -136,6 +136,21 @@ def safe_forward(self, obs, actions):
     # 在關鍵步驟添加日誌
     print("[DEBUG] reward_giver.forward: obs shape:", obs.shape, "actions shape:", actions.shape)
 
+    # 檢查 actions 的形狀和值
+    print("[DEBUG] reward_giver.forward: actions values:", actions)
+    if self.discrete_actions:
+        # 離散動作空間
+        if len(actions.shape) != 1:
+            raise ValueError(f"離散動作的形狀應為 [batch_size]，但得到 {actions.shape}")
+        if not ((0 <= actions).all() and (actions < self.n_actions).all()):
+            raise ValueError(f"離散動作的值應在 [0, {self.n_actions}) 範圍內，但得到 {actions}")
+    else:
+        # 連續動作空間
+        if len(actions.shape) != 2 or actions.shape[1] != self.action_dim:
+            raise ValueError(f"連續動作的形狀應為 [batch_size, action_dim]，但得到 {actions.shape}")
+        if not ((actions >= self.action_space.low).all() and (actions <= self.action_space.high).all()):
+            raise ValueError(f"連續動作的值應在範圍 {self.action_space.low} 到 {self.action_space.high} 之間，但得到 {actions}")
+
     # 確保 obs 和 actions 的形狀匹配
     if obs.shape[0] != actions.shape[0]:
         raise ValueError(f"批次大小不匹配: obs.shape[0]={obs.shape[0]}, actions.shape[0]={actions.shape[0]}")
