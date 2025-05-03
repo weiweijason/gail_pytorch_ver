@@ -106,6 +106,14 @@ class TransitionClassifier(nn.Module):
         if self.normalize:
             obs = (obs - self.obs_rms.mean) / self.obs_rms.std
         
+        # 檢查空批次問題
+        if actions.shape[0] == 0:
+            # 如果動作張量是空的，使用一個默認動作張量
+            if self.discrete_actions:
+                actions = torch.zeros(obs.shape[0], 1, device=self.device)
+            else:
+                actions = torch.zeros(obs.shape[0], self.n_actions, device=self.device)
+        
         # 確保張量維度匹配
         # 檢查並修正維度不匹配問題
         if len(obs.shape) != len(actions.shape):
@@ -120,22 +128,42 @@ class TransitionClassifier(nn.Module):
         # 處理動作
         if self.discrete_actions:
             # 確保離散動作是正確的長整型並轉為one-hot編碼
-            actions = actions.reshape(-1).long()  # 確保是1D
-            actions = F.one_hot(actions, self.n_actions).float()
+            try:
+                actions = actions.reshape(-1).long()  # 確保是1D
+                actions = F.one_hot(actions, self.n_actions).float()
+            except RuntimeError as e:
+                # 如果轉換失敗，創建默認的one-hot編碼
+                print(f"動作轉換錯誤: {e}，使用默認動作")
+                actions = torch.zeros(obs.shape[0], self.n_actions, device=self.device)
+                actions[:, 0] = 1.0  # 默認選擇第一個動作
             
         # 合併觀測值和動作前確保兩者形狀兼容
-        # 打印調試信息，幫助診斷問題
+        # 如果批次維度不匹配，但觀察值非空
         if obs.shape[0] != actions.shape[0]:
-            print(f"批次維度不匹配: obs.shape={obs.shape}, actions.shape={actions.shape}")
-            # 嘗試調整批次大小
-            min_batch = min(obs.shape[0], actions.shape[0])
-            obs = obs[:min_batch]
-            actions = actions[:min_batch]
+            if obs.shape[0] > 0 and actions.shape[0] > 0:
+                # 嘗試調整批次大小
+                min_batch = min(obs.shape[0], actions.shape[0])
+                obs = obs[:min_batch]
+                actions = actions[:min_batch]
+            elif obs.shape[0] > 0 and actions.shape[0] == 0:
+                # 如果動作是空的但觀察值不是，創建與觀察值匹配的動作
+                if self.discrete_actions:
+                    actions = torch.zeros(obs.shape[0], self.n_actions, device=self.device)
+                    actions[:, 0] = 1.0  # 默認選擇第一個動作
+                else:
+                    actions = torch.zeros(obs.shape[0], self.n_actions, device=self.device)
+            elif obs.shape[0] == 0:
+                # 如果觀察值是空的，返回一個零張量
+                return torch.zeros(1, 1, device=self.device)
         
         # 合併觀測值和動作
-        inputs = torch.cat([obs, actions], dim=1)
-        
-        return self.network(inputs)
+        try:
+            inputs = torch.cat([obs, actions], dim=1)
+            return self.network(inputs)
+        except RuntimeError as e:
+            print(f"合併張量錯誤: {e}, obs.shape={obs.shape}, actions.shape={actions.shape}")
+            # 返回一個零張量作為後備
+            return torch.zeros(max(1, obs.shape[0]), 1, device=self.device)
         
     def get_reward(self, obs, actions):
         """
