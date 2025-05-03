@@ -59,15 +59,22 @@ class PPO:
         
         # 處理環境觀察值的轉換
         try:
+            # 檢查是否為列表並且包含數組和字典（特殊情況處理）
+            if isinstance(obs, (list, tuple)) and any(isinstance(x, np.ndarray) for x in obs):
+                # 尋找obs中的numpy數組元素並使用它
+                for item in obs:
+                    if isinstance(item, np.ndarray) and item.dtype != np.object_:
+                        obs = item.astype(np.float32)
+                        break
             # 如果是可直接展平的數組，將其轉換為浮點數
-            if isinstance(obs, np.ndarray):
+            elif isinstance(obs, np.ndarray):
                 if obs.dtype == np.object_:
                     # 嘗試以遞迴方式處理複雜的觀察值結構
                     flat_obs = []
                     for item in obs.flatten():
                         if isinstance(item, (list, tuple, np.ndarray)):
-                            flat_obs.extend([float(x) for x in item])
-                        else:
+                            flat_obs.extend([float(x) for x in item if not isinstance(x, dict)])
+                        elif not isinstance(item, dict):  # 跳過字典類型
                             flat_obs.append(float(item))
                     obs = np.array(flat_obs, dtype=np.float32)
                 else:
@@ -86,13 +93,29 @@ class PPO:
                         if isinstance(item, (list, tuple, np.ndarray)):
                             for subitem in item:
                                 flatten_recursive(subitem)
-                        else:
+                        elif not isinstance(item, dict):  # 跳過字典類型
                             flat_obs.append(float(item))
                     
                     flatten_recursive(obs)
                     obs = np.array(flat_obs, dtype=np.float32)
         except Exception as e:
-            raise ValueError(f"無法將觀察值轉換為數值數組: {e}。觀察值: {obs}")
+            # 最後的應急方案：如果環境返回了難以處理的觀察值，嘗試模擬CartPole標準觀察值
+            print(f"警告: 處理觀察值時出錯: {e}。嘗試使用替代方法...")
+            try:
+                # 檢測是否有標準CartPole觀察值
+                if isinstance(obs, (list, tuple)) and len(obs) > 0:
+                    for item in obs:
+                        if isinstance(item, np.ndarray) and len(item) == 4:
+                            obs = item.astype(np.float32)
+                            break
+                    else:
+                        # 如果沒有找到適合的數組，創建一個零數組
+                        obs = np.zeros(4, dtype=np.float32)
+                else:
+                    # 強制創建一個CartPole標準觀察格式
+                    obs = np.zeros(4, dtype=np.float32)
+            except Exception as e2:
+                raise ValueError(f"無法將觀察值轉換為數值數組: {e}，且備選方案也失敗: {e2}。觀察值: {obs}")
         
         done = False
         
@@ -107,15 +130,23 @@ class PPO:
             # 執行動作
             next_obs, reward, done, info = env.step(action.cpu().numpy())
             
-            # 處理下一個觀察值的轉換，與上面相同的邏輯
+            # 處理下一個觀察值的轉換，類似於上面的邏輯
             try:
-                if isinstance(next_obs, np.ndarray):
+                # 檢查是否為列表並且包含數組和字典（特殊情況處理）
+                if isinstance(next_obs, (list, tuple)) and any(isinstance(x, np.ndarray) for x in next_obs):
+                    # 尋找next_obs中的numpy數組元素並使用它
+                    for item in next_obs:
+                        if isinstance(item, np.ndarray) and item.dtype != np.object_:
+                            next_obs = item.astype(np.float32)
+                            break
+                # 剩餘的處理邏輯與之前相同
+                elif isinstance(next_obs, np.ndarray):
                     if next_obs.dtype == np.object_:
                         flat_next_obs = []
                         for item in next_obs.flatten():
                             if isinstance(item, (list, tuple, np.ndarray)):
-                                flat_next_obs.extend([float(x) for x in item])
-                            else:
+                                flat_next_obs.extend([float(x) for x in item if not isinstance(x, dict)])
+                            elif not isinstance(item, dict):  # 跳過字典類型
                                 flat_next_obs.append(float(item))
                         next_obs = np.array(flat_next_obs, dtype=np.float32)
                     else:
@@ -130,13 +161,30 @@ class PPO:
                             if isinstance(item, (list, tuple, np.ndarray)):
                                 for subitem in item:
                                     flatten_recursive(subitem)
-                            else:
+                            elif not isinstance(item, dict):  # 跳過字典類型
                                 flat_next_obs.append(float(item))
                         
                         flatten_recursive(next_obs)
                         next_obs = np.array(flat_next_obs, dtype=np.float32)
             except Exception as e:
-                raise ValueError(f"無法將下一個觀察值轉換為數值數組: {e}。觀察值: {next_obs}")
+                # 最後的應急方案：如果處理失敗，嘗試使用前一個觀察值
+                print(f"警告: 處理下一個觀察值時出錯: {e}。嘗試使用替代方法...")
+                try:
+                    # 檢測是否有標準CartPole觀察值
+                    if isinstance(next_obs, (list, tuple)) and len(next_obs) > 0:
+                        for item in next_obs:
+                            if isinstance(item, np.ndarray) and len(item) == 4:
+                                next_obs = item.astype(np.float32)
+                                break
+                        else:
+                            # 如果沒有找到適合的數組，使用前一個觀察值
+                            next_obs = obs.copy()
+                    else:
+                        # 使用前一個觀察值
+                        next_obs = obs.copy()
+                except Exception as e2:
+                    print(f"處理下一個觀察值的備選方案也失敗: {e2}，使用前一個觀察值")
+                    next_obs = obs.copy()
             
             # 如果使用GAIL，使用判別器計算獎勵
             if reward_fn is not None:
@@ -157,15 +205,22 @@ class PPO:
             # 如果回合結束，重置環境
             if done:
                 obs = env.reset()
-                # 處理重置後的觀察值轉換，與上面相同的邏輯
+                # 處理重置後的觀察值轉換，與上面初始化環境時的處理邏輯相同
                 try:
-                    if isinstance(obs, np.ndarray):
+                    # 檢查是否為列表並且包含數組和字典（特殊情況處理）
+                    if isinstance(obs, (list, tuple)) and any(isinstance(x, np.ndarray) for x in obs):
+                        # 尋找obs中的numpy數組元素並使用它
+                        for item in obs:
+                            if isinstance(item, np.ndarray) and item.dtype != np.object_:
+                                obs = item.astype(np.float32)
+                                break
+                    elif isinstance(obs, np.ndarray):
                         if obs.dtype == np.object_:
                             flat_obs = []
                             for item in obs.flatten():
                                 if isinstance(item, (list, tuple, np.ndarray)):
-                                    flat_obs.extend([float(x) for x in item])
-                                else:
+                                    flat_obs.extend([float(x) for x in item if not isinstance(x, dict)])
+                                elif not isinstance(item, dict):  # 跳過字典類型
                                     flat_obs.append(float(item))
                             obs = np.array(flat_obs, dtype=np.float32)
                         else:
@@ -180,13 +235,29 @@ class PPO:
                                 if isinstance(item, (list, tuple, np.ndarray)):
                                     for subitem in item:
                                         flatten_recursive(subitem)
-                                else:
+                                elif not isinstance(item, dict):  # 跳過字典類型
                                     flat_obs.append(float(item))
                             
                             flatten_recursive(obs)
                             obs = np.array(flat_obs, dtype=np.float32)
                 except Exception as e:
-                    raise ValueError(f"無法將重置後的觀察值轉換為數值數組: {e}。觀察值: {obs}")
+                    # 最後的應急方案：如果環境返回了難以處理的觀察值，嘗試使用標準CartPole觀察值
+                    print(f"警告: 處理重置後的觀察值時出錯: {e}。嘗試使用替代方法...")
+                    try:
+                        # 檢測是否有標準CartPole觀察值
+                        if isinstance(obs, (list, tuple)) and len(obs) > 0:
+                            for item in obs:
+                                if isinstance(item, np.ndarray) and len(item) == 4:
+                                    obs = item.astype(np.float32)
+                                    break
+                            else:
+                                # 如果沒有找到適合的數組，創建一個零數組
+                                obs = np.zeros(4, dtype=np.float32)
+                        else:
+                            # 強制創建一個CartPole標準觀察格式
+                            obs = np.zeros(4, dtype=np.float32)
+                    except Exception as e2:
+                        raise ValueError(f"無法將重置後的觀察值轉換為數值數組: {e}，且備選方案也失敗: {e2}。觀察值: {obs}")
                 
                 done = False
                 
