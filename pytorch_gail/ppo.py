@@ -126,6 +126,10 @@ class PPO:
             # 獲取策略動作
             with torch.no_grad():
                 value, action, log_prob = self.policy.act(obs_tensor)
+
+            # 檢查動作是否在環境的動作空間內
+            if not self.env.action_space.contains(action.cpu().numpy()):
+                raise ValueError(f"動作 {action.cpu().numpy()} 超出環境的動作空間範圍 {self.env.action_space}")
                 
             # 執行動作
             next_obs, reward, done, info = env.step(action.cpu().numpy())
@@ -190,6 +194,10 @@ class PPO:
             if reward_fn is not None:
                 # 確保傳遞給 reward_fn 的參數格式正確
                 reward = reward_fn(obs, action.cpu().numpy())
+
+            # 檢查獎勵是否為有效數值
+            if not np.isfinite(reward):
+                raise ValueError(f"獎勵 {reward} 不是有效的數值。請檢查 reward_fn 的實現。")
                 
             # 儲存轉換
             observations.append(obs)
