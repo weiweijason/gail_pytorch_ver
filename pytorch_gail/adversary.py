@@ -106,10 +106,32 @@ class TransitionClassifier(nn.Module):
         if self.normalize:
             obs = (obs - self.obs_rms.mean) / self.obs_rms.std
         
+        # 確保張量維度匹配
+        # 檢查並修正維度不匹配問題
+        if len(obs.shape) != len(actions.shape):
+            # 如果維度數量不同
+            if len(actions.shape) == 3 and len(obs.shape) == 2:
+                # 3D動作張量 -> 2D
+                actions = actions.view(actions.shape[0], -1)
+            elif len(obs.shape) == 3 and len(actions.shape) == 2:
+                # 如果觀察值是3D但動作是2D
+                obs = obs.view(obs.shape[0], -1)
+        
         # 處理動作
         if self.discrete_actions:
-            actions = F.one_hot(actions.long(), self.n_actions).float()
+            # 確保離散動作是正確的長整型並轉為one-hot編碼
+            actions = actions.reshape(-1).long()  # 確保是1D
+            actions = F.one_hot(actions, self.n_actions).float()
             
+        # 合併觀測值和動作前確保兩者形狀兼容
+        # 打印調試信息，幫助診斷問題
+        if obs.shape[0] != actions.shape[0]:
+            print(f"批次維度不匹配: obs.shape={obs.shape}, actions.shape={actions.shape}")
+            # 嘗試調整批次大小
+            min_batch = min(obs.shape[0], actions.shape[0])
+            obs = obs[:min_batch]
+            actions = actions[:min_batch]
+        
         # 合併觀測值和動作
         inputs = torch.cat([obs, actions], dim=1)
         
