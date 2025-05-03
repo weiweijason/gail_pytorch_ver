@@ -56,6 +56,11 @@ class ActorCriticPolicy(nn.Module):
             return action_mean, action_std, values
     
     def act(self, obs, deterministic=False):
+        # 確保輸入是批次形式
+        is_single_obs = len(obs.shape) == 1
+        if is_single_obs:
+            obs = obs.unsqueeze(0)  # 將單一觀察值轉換為批次(batch)形式
+            
         if self.is_discrete:
             action_logits, values = self.forward(obs)
             
@@ -81,6 +86,12 @@ class ActorCriticPolicy(nn.Module):
                 ((action - action_mean) / (action_std + 1e-8)) ** 2 + 
                 2 * self.actor_log_std + np.log(2 * np.pi)
             ).sum(dim=1)
+        
+        # 如果輸入是單一觀察值，則移除批次維度
+        if is_single_obs:
+            values = values.squeeze(0)
+            action = action.squeeze(0)
+            log_prob = log_prob.squeeze(0)
             
         return values, action, log_prob
         
