@@ -120,21 +120,43 @@ class TransitionClassifier(nn.Module):
         使用觀測值和動作預測獎勵
         """
         with torch.no_grad():
+            # 將觀察值轉換為張量
             obs_tensor = torch.FloatTensor(obs).to(self.device)
             if len(obs_tensor.shape) == 1:
                 obs_tensor = obs_tensor.unsqueeze(0)
                 
+            # 將動作轉換為張量
             if isinstance(actions, np.ndarray):
                 actions_tensor = torch.FloatTensor(actions).to(self.device)
             else:
                 actions_tensor = actions.to(self.device)
                 
-            if len(actions_tensor.shape) == 1:
-                actions_tensor = actions_tensor.unsqueeze(0)
-            elif len(actions_tensor.shape) == 0:
-                # 單個離散動作
-                actions_tensor = actions_tensor.unsqueeze(0)
-                
+            # 確保動作是 2D 張量 [batch_size, action_dim]
+            if len(actions_tensor.shape) == 0:  # 單個標量值
+                actions_tensor = actions_tensor.unsqueeze(0).unsqueeze(0)
+            elif len(actions_tensor.shape) == 1:  # 一維向量 [action_dim] 或 [batch_size]
+                actions_tensor = actions_tensor.unsqueeze(0) if actions_tensor.shape[0] != obs_tensor.shape[0] else actions_tensor.unsqueeze(1)
+            elif len(actions_tensor.shape) == 3:  # 3D 張量 [batch_size, extra_dim, action_dim]
+                # 壓縮 3D 到 2D
+                actions_tensor = actions_tensor.view(actions_tensor.shape[0], -1)
+            
+            # 確保批次維度匹配
+            if actions_tensor.shape[0] != obs_tensor.shape[0]:
+                if actions_tensor.shape[0] == 1:
+                    # 廣播動作到所有觀察值
+                    actions_tensor = actions_tensor.expand(obs_tensor.shape[0], -1)
+                elif obs_tensor.shape[0] == 1:
+                    # 廣播觀察值到所有動作
+                    obs_tensor = obs_tensor.expand(actions_tensor.shape[0], -1)
+                else:
+                    # 如果完全不匹配，打印詳細信息供調試
+                    print(f"維度不匹配: obs_tensor.shape={obs_tensor.shape}, actions_tensor.shape={actions_tensor.shape}")
+                    # 截斷到較短長度或進行其他調整
+                    min_batch = min(obs_tensor.shape[0], actions_tensor.shape[0])
+                    obs_tensor = obs_tensor[:min_batch]
+                    actions_tensor = actions_tensor[:min_batch]
+            
+            # 進行預測
             logits = self(obs_tensor, actions_tensor)
             reward = -torch.log(1 - torch.sigmoid(logits) + 1e-8)
             
