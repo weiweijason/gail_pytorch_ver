@@ -24,8 +24,16 @@ gail = GAIL(
     device="cuda"
 )
 
-# 確保環境重置時返回正確格式的觀察值
-env.reset = lambda: np.array(env.reset()).reshape(1, -1)[0]
+# 保存原始的 reset 方法，避免遞迴
+original_reset = env.reset
+
+# 定義新的 reset 方法
+def wrapped_reset():
+    obs = original_reset()
+    return np.array(obs).reshape(1, -1)[0]
+
+# 替換環境的 reset 方法
+env.reset = wrapped_reset
 
 # 訓練模型
 gail.learn(total_timesteps=100000)
