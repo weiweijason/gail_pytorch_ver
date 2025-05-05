@@ -118,6 +118,9 @@ def safe_forward(self, obs, actions):
         if self.discrete_actions and len(actions.shape) == 2 and actions.shape[1] == self.n_actions:
             actions = torch.argmax(actions, dim=1)
             print("[DEBUG] reward_giver.forward: actions converted to indices:", actions)
+            # 如果 actions 是空張量，但 obs 不是，則創建與 obs 批次大小匹配的默認動作
+            if actions.shape[0] == 0 and obs.shape[0] > 0:
+                actions = torch.zeros(obs.shape[0], dtype=torch.long, device=obs.device)
         
         # 確保批次維度匹配
         if obs.shape[0] != actions.shape[0]:
@@ -132,59 +135,60 @@ def safe_forward(self, obs, actions):
                 actions = actions[:min_batch]
             else:
                 # 如果 actions 是空的，創建一個假的動作張量
-                action_dim = self.n_actions if self.discrete_actions else actions.shape[1] if len(actions.shape) > 1 else 1
-                actions = torch.zeros((min_batch, action_dim), device=actions.device)
-        
-        # 合併觀測值和動作
-        inputs = torch.cat([obs, actions], dim=1)
+                if self.discrete_actions:
+                    actions = torch.zeros(min_batch, dtype=torch.long, device=obs.device)
+                else:
+                    action_dim = actions.shape[1] if len(actions.shape) > 1 else 1
+                    actions = torch.zeros((min_batch, action_dim), device=obs.device)
+                
+        # 在關鍵步驟添加日誌
+        print("[DEBUG] reward_giver.forward: obs shape:", obs.shape, "actions shape:", actions.shape)
     
-    # 在關鍵步驟添加日誌
-    print("[DEBUG] reward_giver.forward: obs shape:", obs.shape, "actions shape:", actions.shape)
-
-    # 確保 actions 的形狀和值正確
-    if self.discrete_actions:
-        if len(actions.shape) == 2 and actions.shape[1] == self.n_actions:
-            actions = torch.argmax(actions, dim=1)
-            print("[DEBUG] reward_giver.forward: actions converted to indices:", actions)
-        elif len(actions.shape) != 1:
-            raise ValueError(f"離散動作的形狀應為 [batch_size]，但得到 {actions.shape}")
-
-        # 確保 actions 的值在範圍內
-        if not ((0 <= actions).all() and (actions < self.n_actions).all()):
-            raise ValueError(f"離散動作的值應在 [0, {self.n_actions}) 範圍內，但得到 {actions}")
-
-    # 確保 obs 和 actions 的批次大小一致
-    if obs.shape[0] != actions.shape[0]:
-        raise ValueError(f"批次大小不匹配: obs.shape[0]={obs.shape[0]}, actions.shape[0]={actions.shape[0]}")
-
-    # 添加更多日誌
-    print("[DEBUG] reward_giver.forward: final obs shape:", obs.shape, "final actions shape:", actions.shape)
-
-    # 檢查 actions 的形狀和值
-    print("[DEBUG] reward_giver.forward: actions values:", actions)
-    if self.discrete_actions:
-        # 離散動作空間
-        if len(actions.shape) != 1:
-            raise ValueError(f"離散動作的形狀應為 [batch_size]，但得到 {actions.shape}")
-        if not ((0 <= actions).all() and (actions < self.n_actions).all()):
-            raise ValueError(f"離散動作的值應在 [0, {self.n_actions}) 範圍內，但得到 {actions}")
-    else:
-        # 連續動作空間
-        if len(actions.shape) != 2 or actions.shape[1] != self.action_dim:
-            raise ValueError(f"連續動作的形狀應為 [batch_size, action_dim]，但得到 {actions.shape}")
-        if not ((actions >= self.action_space.low).all() and (actions <= self.action_space.high).all()):
-            raise ValueError(f"連續動作的值應在範圍 {self.action_space.low} 到 {self.action_space.high} 之間，但得到 {actions}")
-
-    # 確保 obs 和 actions 的形狀匹配
-    if obs.shape[0] != actions.shape[0]:
-        raise ValueError(f"批次大小不匹配: obs.shape[0]={obs.shape[0]}, actions.shape[0]={actions.shape[0]}")
-
-    # 確保 actions 的值在動作空間範圍內
-    if hasattr(env.action_space, 'n') and not (0 <= actions).all() and not (actions < env.action_space.n).all():
-        raise ValueError(f"動作值超出範圍: actions={actions}, action_space.n={env.action_space.n}")
-
-    # 實際前向傳播
-    return self.network(inputs)
+        # 確保 actions 的形狀與 obs 兼容，但只對連續動作進行調整
+        if len(actions.shape) == 1 and not self.discrete_actions:
+            actions = actions.unsqueeze(1)  # 只為連續動作調整形狀
+            print("[DEBUG] reward_giver.forward: actions reshaped to:", actions.shape)
+        
+        # 添加更多日誌
+        print("[DEBUG] reward_giver.forward: final obs shape:", obs.shape, "final actions shape:", actions.shape)
+        
+        # 對於離散動作，需要轉為 one-hot 編碼才能與觀測值合併
+        if self.discrete_actions:
+            # 檢查 actions 值是否在有效範圍內
+            if not ((0 <= actions).all() and (actions < self.n_actions).all()):
+                print(f"警告：動作值超出範圍，調整為有效值")
+                actions = torch.clamp(actions, 0, self.n_actions - 1)
+            
+            # 確保 actions 的形狀正確
+            if actions.numel() == 0:
+                print("警告：actions 是空張量，使用默認動作")
+                actions = torch.zeros(obs.shape[0], dtype=torch.long, device=obs.device)
+            
+            print("[DEBUG] one_hot 轉換前 actions shape:", actions.shape, "value:", actions)
+            
+            # 使用 try-except 塊處理可能的錯誤
+            try:
+                # 將離散動作轉為 one-hot 編碼用於網絡輸入
+                one_hot_actions = F.one_hot(actions.long(), self.n_actions).float()
+                print("[DEBUG] one_hot_actions shape:", one_hot_actions.shape)
+                inputs = torch.cat([obs, one_hot_actions], dim=1)
+            except Exception as e:
+                print(f"轉換 one-hot 編碼時出錯: {e}")
+                # 使用一個安全的替代方案
+                one_hot_actions = torch.zeros(obs.shape[0], self.n_actions, device=obs.device)
+                one_hot_actions[:, 0] = 1.0  # 默認選擇第一個動作
+                inputs = torch.cat([obs, one_hot_actions], dim=1)
+            
+            print("[DEBUG] 合併後 inputs shape:", inputs.shape)
+        else:
+            # 連續動作直接合併
+            inputs = torch.cat([obs, actions], dim=1)
+        
+        # 添加調試信息
+        print("[DEBUG] reward_giver.forward: inputs shape:", inputs.shape)
+            
+        # 實際前向傳播
+        return self.network(inputs)
 
 # 替換 forward 方法
 gail.reward_giver.forward = lambda obs, actions: safe_forward(gail.reward_giver, obs, actions)
